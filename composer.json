@@ -1,0 +1,5 @@
+{
+    "require": {
+        "serafim/gitter-api": "^4.0"
+    }
+}
