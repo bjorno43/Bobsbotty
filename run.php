@@ -16,6 +16,7 @@ $client = new Client(TOKEN);
 
 $observers = array();
 $roomIds = array();
+$challenges = array();
 $currentRoom = 0;
 
 /* Get messages and id's for each room */
@@ -26,17 +27,12 @@ foreach ($client->rooms as $room) {
 
 /* Create observer for each room */
 foreach ($observers as $observer) {
-	$observer->subscribe(function ($message) use ($client, $roomIds, $currentRoom){
+	$observer->subscribe(function ($message) use ($client, $roomIds, $currentRoom, $challenges){
 		// Uncomment to enable message debugger
 		//file_put_contents('lastMsg.txt', print_r($message, true));
 		
 		// Verify bot being mentioned first by user
 		if(!empty($message['mentions'][0]) && $message['mentions'][0]['screenName'] === BOTUSER){
-
-			// Instantiate V8Js engine
-			$v8 = new V8Js();
-			$v8->setTimeLimit(10000);
-			$v8->setMemoryLimit(10240000);
 
 			// Instantiate database
 			$db = new Database;
@@ -73,59 +69,30 @@ foreach ($observers as $observer) {
 
 			// Command 'help challenges' received
 			} else if(preg_match("/^help challenges$/i", $msg[1])){
-				$client->messages->create($roomIds[$currentRoom],
-					"@".$message['fromUser']['username'].
-					" Similar to [Codewars](https://www.codewars.com), I can provide Javascript challenges which you need to solve.\n".
-					"To see the current challenge (command: challenge)\n".
-					"To input your solution (command: solve) followed by your code between 3 backticks\n".
-					"To see the ranks (command: ranks)\n".
-					"To see how many points you've earned (command: points)\n\n".
+				if($roomIds[$currentRoom] == '5b903b77d73408ce4fa70b9c'){
+					$client->messages->create($roomIds[$currentRoom],
+						"@".$message['fromUser']['username'].
+						" Similar to [Codewars](https://www.codewars.com), I can provide Javascript challenges which you need to solve.\n".
+						"To see the current challenge (command: challenge)\n".
+						"To input your solution (command: solve) followed by your code between 3 backticks\n".
+						"To see the ranks (command: ranks)\n".
+						"To see how many points you've earned (command: points)\n\n".
 
-					"If you wish to contribute your own challenge, please go to [". BOTURL ."](". BOTURL .") and follow the instructions"
-				);
+						"If you wish to contribute your own challenge, please go to [". BOTURL ."](". BOTURL .") and follow the instructions"
+					);
+				} else {
+					$client->messages->create($roomIds[$currentRoom],
+						"@".$message['fromUser']['username'].
+						" Javascript challenges are only available in the room: [JavascriptChallenges](https://gitter.im/FreeCodeCamp/JavascriptChallenges)"
+					);
+				}
 
 			// Command 'challenge' received
 			} else if(preg_match("/^challenge$/i", $msg[1])){
 
-				// Select current challenge from database
-				$db->query("SELECT description, conditions, example FROM challenges WHERE current = 1");
-
-				try {
-					$dbresult = $db->single();
-				} catch(PDOException $e){
-					echo "PDO Error: ". $e->getMessage();
-					$client->messages->create($roomIds[$currentRoom],
-						"@".$message['fromUser']['username'].
-						" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-						"To prevent further issues I will now shut down."
-					);
-					exit;
-				}
-
-				// Return current challenge to user
-				$client->messages->create($roomIds[$currentRoom],
-					"@".$message['fromUser']['username'].
-					" The current challenge is:\n".
-					$dbresult['description']."\n\n".
-					"Rules:\n".
-					$dbresult['conditions']."\n\n".
-					"Example:\n".
-					$dbresult['example']
-				);
-			
-			// Command 'solve' received
-			} else if(preg_match("/^solve/i", $msg[1])){
-
-				// Verify user providing a solution
-				if(preg_match("/```(.*)```/s", $message['text'], $result)){
-
-					// Sandbox user provided code
-					$js = <<<EOT
-$result[1]
-EOT;
-
-					// Select current challenge's tests from database
-					$db->query("SELECT id, tests, results FROM challenges WHERE current = 1");
+				if($roomIds[$currentRoom] == '5b903b77d73408ce4fa70b9c'){
+					// Select current challenge from database
+					$db->query("SELECT description, conditions, example FROM challenges WHERE current = 1");
 
 					try {
 						$dbresult = $db->single();
@@ -139,133 +106,37 @@ EOT;
 						exit;
 					}
 
-					// Parse tests and their expected results into arrays
-					$tests = explode("\n", $dbresult['tests']);
-					$results = explode("\n", $dbresult['results']);
+					// Return current challenge to user
+					$client->messages->create($roomIds[$currentRoom],
+						"@".$message['fromUser']['username'].
+						" The current challenge is:\n".
+						$dbresult['description']."\n\n".
+						"Rules:\n".
+						$dbresult['conditions']."\n\n".
+						"Example:\n".
+						$dbresult['example']
+					);
+				} else {
+					$client->messages->create($roomIds[$currentRoom],
+						"@".$message['fromUser']['username'].
+						" This command is only available in the room: [JavascriptChallenges](https://gitter.im/FreeCodeCamp/JavascriptChallenges)"
+					);
+				}
+			
+			// Command 'solve' received
+			} else if(preg_match("/^solve/i", $msg[1])){
 
-					// Assume user provided correct solution
-					$solved = true;
+				if($roomIds[$currentRoom] == '5b903b77d73408ce4fa70b9c'){
+				// Verify user providing a solution
+					if(preg_match("/```(.*)```/s", $message['text'], $result)){
 
-					// Run tests against user provided solution
-					for($i = 0; $i < count($tests); $i++){
-						$run = $js.PHP_EOL.$tests[$i];
-						try {
-							$output = $v8->executeString($run);
+						// Sandbox user provided code
+						$js = <<<EOT
+$result[1]
+EOT;
 
-							// Test failed
-							if($output != $results[$i]){
-								$client->messages->create($roomIds[$currentRoom],
-									"@".$message['fromUser']['username'].
-									" Test `".$tests[$i]."` should return `".$results[$i]."`. Instead got: `".$output."`. Please try again!
-								");
-								$solved = false;
-								break;
-							}
-
-						// JS error in user provided code solution
-						} catch (V8JsException $e) {
-							$output = $e->getMessage();
-
-							$client->messages->create($roomIds[$currentRoom],
-								"@".$message['fromUser']['username'].
-								" There was an error with your Javascript code:\n".
-								"```\n".
-								$output."\n".
-								"```"
-							);
-							$solved = false;
-							break;
-						}
-					}
-
-					// All tests succeeded
-					if($solved){
-
-						// Verify if user already solved the current challenge in the past
-						$db->query("SELECT id FROM solved WHERE username = :user AND challengeid = :id");
-						$db->bind(":user", $message['fromUser']['username']);
-						$db->bind(":id", $dbresult['id']);
-
-						try {
-							$dbUserResult = $db->single();
-						} catch(PDOException $e){
-							echo "PDO Error: ". $e->getMessage();
-							$client->messages->create($roomIds[$currentRoom],
-								"@".$message['fromUser']['username'].
-								" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-								"To prevent further issues I will now shut down."
-							);
-							exit;
-						}
-
-						// User solved the challenge in the past
-						if($db->rowCount() > 0){
-							// Congratulate user
-							$client->messages->create($roomIds[$currentRoom],
-								"@".$message['fromUser']['username'].
-								" Congratulations! Your solution is correct!\n".
-								"You were not granted any points for this solution because you've already solved this challenge before."
-							);
-						} else {
-							// Congratulate user
-							$client->messages->create($roomIds[$currentRoom],
-								"@".$message['fromUser']['username'].
-								" Congratulations! Your solution is correct!\n".
-								"A new random challenge has been selected. Keep in mind that this could be the same challenge as before. The chance of this happening will decrease as more challenges are added to the database.\n".
-								"Message \"challenge\" to me to see the new challenge!"
-							);
-
-							// Grant user a point for the correct solution
-							$db->query("INSERT INTO users (`username`,`points`) VALUES (:user, 1) ON DUPLICATE KEY UPDATE points = points + 1");
-							$db->bind(":user", $message['fromUser']['username']);
-
-							try {
-								$db->execute();
-							} catch(PDOException $e){
-								echo "PDO Error: ". $e->getMessage();
-								$client->messages->create($roomIds[$currentRoom],
-									"@".$message['fromUser']['username'].
-									" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-									"To prevent further issues I will now shut down."
-								);
-								exit;
-							}
-						}
-
-						// Add the user the list of users that has solved the challenge
-						$db->query("INSERT INTO solved (`challengeid`,`username`) VALUES (:id, :user)");
-						$db->bind(":id", $dbresult['id']);
-						$db->bind(":user", $message['fromUser']['username']);
-
-						try {
-							$db->execute();
-						} catch(PDOException $e){
-							echo "PDO Error: ". $e->getMessage();
-							$client->messages->create($roomIds[$currentRoom],
-								"@".$message['fromUser']['username'].
-								" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-								"To prevent further issues I will now shut down."
-							);
-							exit;
-						}
-
-						// Remove the current status from the challenge
-						$db->query("UPDATE challenges SET solved = solved + 1, current = 0 WHERE current = 1");
-
-						try {
-							$db->execute();
-						} catch(PDOException $e){
-							echo "PDO Error: ". $e->getMessage();
-							$client->messages->create($roomIds[$currentRoom],
-								"@".$message['fromUser']['username'].
-								" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-								"To prevent further issues I will now shut down."
-							);
-							exit;
-						}
-
-						// Select a random new challenge
-						$db->query("SELECT id FROM challenges WHERE status = 2 ORDER BY RAND() LIMIT 1");
+						// Select current challenge's tests from database
+						$db->query("SELECT id, tests, results FROM challenges WHERE current = 1");
 
 						try {
 							$dbresult = $db->single();
@@ -279,91 +150,316 @@ EOT;
 							exit;
 						}
 
-						// Set the random selected challenge to current
-						$db->query("UPDATE challenges SET current = 1 WHERE id = :id");
-						$db->bind(":id", $dbresult['id']);
+						// Parse tests and their expected results into arrays
+						$tests = explode("\n", $dbresult['tests']);
+						$results = explode("\n", $dbresult['results']);
 
-						try {
-							$db->execute();
-						} catch(PDOException $e){
-							echo "PDO Error: ". $e->getMessage();
+						// Assume user provided correct solution
+						$solved = true;
+						
+						$testResults = "";
+
+						// Run tests against user provided solution
+						for($i = 0; $i < count($tests); $i++){
+							$run = $js.PHP_EOL.$tests[$i];
+
+							// Instantiate V8Js engine
+							$v8 = new V8Js();
+							$v8->setTimeLimit(10000);
+							$v8->setMemoryLimit(10240000);
+
+							try {
+								$output = $v8->executeString($run);
+
+								if(is_object($output)){
+									$output = json_encode($output);
+								}
+
+								// Test failed
+								if($output != $results[$i]){
+									$testResults .= "Test `".$tests[$i]."` should return `".$results[$i]."`. Instead got: `".$output."`.\n";
+									$solved = false;
+								}
+
+							// JS error in user provided code solution
+							} catch (V8JsException $e) {
+								$output = $e->getMessage();
+
+								$client->messages->create($roomIds[$currentRoom],
+									"@".$message['fromUser']['username'].
+									" There was an error with your Javascript code:\n".
+									"```\n".
+									$output."\n".
+									"```"
+								);
+								$solved = false;
+								break;
+							}
+
+							unset($v8);
+						}
+
+						// All tests succeeded
+						if($solved){
+
+							// Add challenge to challenges array so it doesn't get selected again
+							array_push($challenges, $dbresult['id']);
+
+							// Verify if user already solved the current challenge in the past
+							$db->query("SELECT id FROM solved WHERE username = :user AND challengeid = :id");
+							$db->bind(":user", $message['fromUser']['username']);
+							$db->bind(":id", $dbresult['id']);
+
+							try {
+								$dbUserResult = $db->single();
+							} catch(PDOException $e){
+								echo "PDO Error: ". $e->getMessage();
+								$client->messages->create($roomIds[$currentRoom],
+									"@".$message['fromUser']['username'].
+									" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
+									"To prevent further issues I will now shut down."
+								);
+								exit;
+							}
+
+							// User solved the challenge in the past
+							if($db->rowCount() > 0){
+								// Congratulate user
+								$client->messages->create($roomIds[$currentRoom],
+									"@".$message['fromUser']['username'].
+									" Congratulations! Your solution is correct!\n".
+									"You were not granted any points for this solution because you've already solved this challenge before.\n".
+									"A new random challenge has been selected. Keep in mind that this could be the same challenge as before. The chance of this happening will decrease as more challenges are added to the database.\n".
+									"Message \"challenge\" to me to see the new challenge!"
+								);
+							} else {
+								// Congratulate user
+								$client->messages->create($roomIds[$currentRoom],
+									"@".$message['fromUser']['username'].
+									" Congratulations! Your solution is correct!\n".
+									"A new random challenge has been selected. Keep in mind that this could be the same challenge as before. The chance of this happening will decrease as more challenges are added to the database.\n".
+									"Message \"challenge\" to me to see the new challenge!"
+								);
+
+								// Grant user a point for the correct solution
+								$db->query("INSERT INTO users (`username`,`points`) VALUES (:user, 1) ON DUPLICATE KEY UPDATE points = points + 1");
+								$db->bind(":user", $message['fromUser']['username']);
+
+								try {
+									$db->execute();
+								} catch(PDOException $e){
+									echo "PDO Error: ". $e->getMessage();
+									$client->messages->create($roomIds[$currentRoom],
+										"@".$message['fromUser']['username'].
+										" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
+										"To prevent further issues I will now shut down."
+									);
+									exit;
+								}
+							}
+
+							// Add the user the list of users that has solved the challenge
+							$db->query("INSERT INTO solved (`challengeid`,`username`) VALUES (:id, :user)");
+							$db->bind(":id", $dbresult['id']);
+							$db->bind(":user", $message['fromUser']['username']);
+
+							try {
+								$db->execute();
+							} catch(PDOException $e){
+								echo "PDO Error: ". $e->getMessage();
+								$client->messages->create($roomIds[$currentRoom],
+									"@".$message['fromUser']['username'].
+									" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
+									"To prevent further issues I will now shut down."
+								);
+								exit;
+							}
+
+							// Remove the current status from the challenge
+							$db->query("UPDATE challenges SET solved = solved + 1, current = 0 WHERE current = 1");
+
+							try {
+								$db->execute();
+							} catch(PDOException $e){
+								echo "PDO Error: ". $e->getMessage();
+								$client->messages->create($roomIds[$currentRoom],
+									"@".$message['fromUser']['username'].
+									" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
+									"To prevent further issues I will now shut down."
+								);
+								exit;
+							}
+
+							// Select a random new challenge
+							$db->query("SELECT id FROM challenges WHERE id NOT IN (".implode(',', $challenges).") AND status = 2 ORDER BY RAND() LIMIT 1");
+
+							try {
+								$dbresult = $db->single();
+							} catch(PDOException $e){
+								echo "PDO Error: ". $e->getMessage();
+								$client->messages->create($roomIds[$currentRoom],
+									"@".$message['fromUser']['username'].
+									" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
+									"To prevent further issues I will now shut down."
+								);
+								exit;
+							}
+
+							if($db->rowCount() > 0){
+								// Set the random selected challenge to current
+								$db->query("UPDATE challenges SET current = 1 WHERE id = :id");
+								$db->bind(":id", $dbresult['id']);
+
+								try {
+									$db->execute();
+								} catch(PDOException $e){
+									echo "PDO Error: ". $e->getMessage();
+									$client->messages->create($roomIds[$currentRoom],
+										"@".$message['fromUser']['username'].
+										" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
+										"To prevent further issues I will now shut down."
+									);
+									exit;
+								}
+							} else {
+								$challenges = array();
+
+								// Select a random new challenge
+								$db->query("SELECT id FROM challenges WHERE id NOT IN (".implode(',', $challenges).") AND status = 2 ORDER BY RAND() LIMIT 1");
+
+								try {
+									$dbresult = $db->single();
+								} catch(PDOException $e){
+									echo "PDO Error: ". $e->getMessage();
+									$client->messages->create($roomIds[$currentRoom],
+										"@".$message['fromUser']['username'].
+										" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
+										"To prevent further issues I will now shut down."
+									);
+									exit;
+								}
+
+								// Set the random selected challenge to current
+								$db->query("UPDATE challenges SET current = 1 WHERE id = :id");
+								$db->bind(":id", $dbresult['id']);
+
+								try {
+									$db->execute();
+								} catch(PDOException $e){
+									echo "PDO Error: ". $e->getMessage();
+									$client->messages->create($roomIds[$currentRoom],
+										"@".$message['fromUser']['username'].
+										" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
+										"To prevent further issues I will now shut down."
+									);
+									exit;
+								}
+							}
+						} else {
 							$client->messages->create($roomIds[$currentRoom],
 								"@".$message['fromUser']['username'].
-								" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-								"To prevent further issues I will now shut down."
+								" ".$testResults."Please try again!"
 							);
-							exit;
 						}
-					}
 
-				// User did not provide a solution
+					// User did not provide a solution
+					} else {
+						$client->messages->create($roomIds[$currentRoom],
+							"@".$message['fromUser']['username'].
+							" Please provide your solution between 3 backticks."
+						);
+					}
 				} else {
 					$client->messages->create($roomIds[$currentRoom],
 						"@".$message['fromUser']['username'].
-						" Please provide your solution between 3 backticks."
+						" This command is only available in the room: [JavascriptChallenges](https://gitter.im/FreeCodeCamp/JavascriptChallenges)"
 					);
 				}
 			
 			// Command 'ranks' received
 			} else if(preg_match("/^ranks/i", $msg[1])){
-				$db->query("SELECT username, points FROM users ORDER BY points DESC LIMIT 5");
+				if($roomIds[$currentRoom] == '5b903b77d73408ce4fa70b9c'){
+					$db->query("SELECT username, points FROM users ORDER BY points DESC LIMIT 5");
 
-				try {
-					$dbresults = $db->resultset();
-				} catch(PDOException $e){
-					echo "PDO Error: ". $e->getMessage();
-					$client->messages->create($roomIds[$currentRoom],
-						"@".$message['fromUser']['username'].
-						" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-						"To prevent further issues I will now shut down."
-					);
-					exit;
-				}
-
-				if($db->rowCount() > 0){
-					$list = "";
-					$place = 1;
-
-					foreach($dbresults as $result){
-						$list .= $place .". ". $result['username'] ." with ". $result['points'] ." points!\n";
-						$place++;
+					try {
+						$dbresults = $db->resultset();
+					} catch(PDOException $e){
+						echo "PDO Error: ". $e->getMessage();
+						$client->messages->create($roomIds[$currentRoom],
+							"@".$message['fromUser']['username'].
+							" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
+							"To prevent further issues I will now shut down."
+						);
+						exit;
 					}
 
-					$client->messages->create($roomIds[$currentRoom], "@".$message['fromUser']['username']." \n".$list);
+					if($db->rowCount() > 0){
+						$list = "";
+						$place = 1;
+
+						foreach($dbresults as $result){
+							$list .= $place .". ". $result['username'] ." with ". $result['points'] ." points!\n";
+							$place++;
+						}
+
+						$client->messages->create($roomIds[$currentRoom], "@".$message['fromUser']['username']." \n".$list);
+					} else {
+						$client->messages->create($roomIds[$currentRoom],
+							"@".$message['fromUser']['username'].
+							" No one has received any points yet!"
+						);
+					}
 				} else {
 					$client->messages->create($roomIds[$currentRoom],
 						"@".$message['fromUser']['username'].
-						" No one has received any points yet!"
+						" This command is only available in the room: [JavascriptChallenges](https://gitter.im/FreeCodeCamp/JavascriptChallenges)"
 					);
 				}
 
 			// Command 'points' received
 			} else if(preg_match("/^points/i", $msg[1])){
-				$db->query("SELECT points FROM users WHERE username = :user");
-				$db->bind(":user", $message['fromUser']['username']);
+				if($roomIds[$currentRoom] == '5b903b77d73408ce4fa70b9c'){
+					$db->query("SELECT points FROM users WHERE username = :user");
+					$db->bind(":user", $message['fromUser']['username']);
 
-				try {
-					$dbresult = $db->single();
-				} catch(PDOException $e){
-					echo "PDO Error: ". $e->getMessage();
-					$client->messages->create($roomIds[$currentRoom],
-						"@".$message['fromUser']['username'].
-						" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-						"To prevent further issues I will now shut down."
-					);
-					exit;
-				}
+					try {
+						$dbresult = $db->single();
+					} catch(PDOException $e){
+						echo "PDO Error: ". $e->getMessage();
+						$client->messages->create($roomIds[$currentRoom],
+							"@".$message['fromUser']['username'].
+							" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
+							"To prevent further issues I will now shut down."
+						);
+						exit;
+					}
 
-				if($db->rowCount() > 0){
-					$client->messages->create($roomIds[$currentRoom],
-						"@".$message['fromUser']['username'].
-						" You currently have: ". $dbresult['points'] ." points!"
-					);
+					if($db->rowCount() > 0){
+						$client->messages->create($roomIds[$currentRoom],
+							"@".$message['fromUser']['username'].
+							" You currently have: ". $dbresult['points'] ." points!"
+						);
+					} else {
+						$client->messages->create($roomIds[$currentRoom],
+							"@".$message['fromUser']['username'].
+							" You did not receive any points yet. Try being the first to solve a challenge and start earning points!"
+						);
+					}
 				} else {
 					$client->messages->create($roomIds[$currentRoom],
 						"@".$message['fromUser']['username'].
-						" You did not receive any points yet. Try being the first to solve a challenge and start earning points!"
+						" This command is only available in the room: [JavascriptChallenges](https://gitter.im/FreeCodeCamp/JavascriptChallenges)"
 					);
+				}
+			// Admin Command 'stop' recieved
+			} else if(preg_match("/^points/i", $msg[1])){
+				if($message['fromUser']['username'] == BOTOWNER){
+				
+					$client->messages->create($roomIds[$currentRoom],
+						"@".$message['fromUser']['username'].
+						" ". BOTUSER ." shut down succesfully!"
+					);
+					exit;
 				}
 
 			// No command received. User is trying to run JS code
@@ -374,8 +470,17 @@ EOT;
 $result[1]
 EOT;
 
+				// Instantiate V8Js engine
+				$v8 = new V8Js();
+				$v8->setTimeLimit(10000);
+				$v8->setMemoryLimit(10240000);
+
 				try {
 					$output = $v8->executeString($js);
+
+					if(is_object($output)){
+						$output = json_encode($output);
+					}
 
 					if(strlen($output) > 200){
 						$client->messages->create($roomIds[$currentRoom],
@@ -405,11 +510,11 @@ EOT;
 						"```"
 					);
 				}
+
+				unset($v8);
 			}
 
 			// Mark instantiated objects for the garbage collector
-			// This is needed because V8Js retains code in memory
-			unset($v8);
 			unset($db);
 		}
 	});
