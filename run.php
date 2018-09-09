@@ -1,23 +1,97 @@
 <?php
 
+/* Allow running from CLI only */
 if (php_sapi_name() != "cli") {
 	http_response_code(404);
 	exit();
 }
 
-require_once 'settings.php';
-require_once 'pdo.class.php';
+/* Requirements */
+require_once './settings.php';
+require_once './classes/pdo.class.php';
 require __DIR__ . '/vendor/autoload.php';
 
+/* Gitter Client */
 use Gitter\Client;
 
-/* Instantiate Gitter API client */
-$client = new Client(TOKEN);
-
+/* Initial vars */
 $observers = array();
 $roomIds = array();
-$challenges = array();
+$challengeIds = array();
 $currentRoom = 0;
+$lastMsg = '';
+$msgRepeats = 0;
+
+/* Instantiate objects */
+$db = new Database;
+$client = new Client(TOKEN);
+
+/* Handles most DB queries */
+function dbQuery($type, $query, $data = array(), $db){
+
+	// Selecting a single row
+	if($type === 'single'){
+		$db->query($query);
+
+		foreach($data as $bind){
+			$db->bind($bind[0], $bind[1]);
+		}
+
+		try {
+			return $db->single();
+		} catch(PDOException $e){
+			file_put_contents('dbErrors.txt', file_get_contents('dbErrors.txt') . "\n" . $e->getMessage());
+			return "Database error. @".BOTOWNER." has been informed about this issue.";
+		}
+
+	// Selecting multiple rows
+	} else if($type === 'resultset'){
+		$db->query($query);
+
+		foreach($data as $bind){
+			$db->bind($bind[0], $bind[1]);
+		}
+
+		try {
+			return $db->resultset();
+		} catch(PDOException $e){
+			file_put_contents('dbErrors.txt', file_get_contents('dbErrors.txt') . "\n" . $e->getMessage());
+			return "Database error. @".BOTOWNER." has been informed about this issue.";
+		}
+
+	// Inserting or update a row
+	} else if($type === 'insert' || $type === 'update'){
+		$db->query($query);
+
+		foreach($data as $bind){
+			$db->bind($bind[0], $bind[1]);
+		}
+
+		try {
+			$db->execute();
+			return 'success';
+		} catch(PDOException $e){
+			file_put_contents('dbErrors.txt', file_get_contents('dbErrors.txt') . "\n" . $e->getMessage());
+			return "Database error. @".BOTOWNER." has been informed about this issue.";
+		}
+	}
+}
+
+$spamPrevention = function($msg) use (&$lastMsg, &$msgRepeats){
+	if($msg === $lastMsg){
+		if($msgRepeats > 1){
+			$msgRepeats = 0;
+			return " Sending random number to prevent SPAM detection after repeating last message more than 3 times: ". rand(1000, 10000) .".\n";
+		} else {
+			$msgRepeats++;
+			return '';
+		}
+	} else {
+		$lastMsg = $msg;
+		$msgRepeats = 0;
+		return '';
+	}
+};
 
 /* Get messages and id's for each room */
 foreach ($client->rooms as $room) {
@@ -27,107 +101,124 @@ foreach ($client->rooms as $room) {
 
 /* Create observer for each room */
 foreach ($observers as $observer) {
-	$observer->subscribe(function ($message) use ($client, $roomIds, $currentRoom, $challenges){
+	$observer->subscribe(function ($message) use ($client, $roomIds, $currentRoom, &$challengeIds, &$db, &$spamPrevention){
 		// Uncomment to enable message debugger
-		//file_put_contents('lastMsg.txt', print_r($message, true));
-		
+		//file_put_contents('messages.txt', file_get_contents('messages.txt') . "\n" . print_r($message, true));
+
 		// Verify bot being mentioned first by user
 		if(!empty($message['mentions'][0]) && $message['mentions'][0]['screenName'] === BOTUSER){
-
-			// Instantiate database
-			$db = new Database;
 
 			$msg = explode(' ', $message['text'], 2);
 			$msg[1] = trim($msg[1]);
 
 			// Command 'help' received
 			if(preg_match("/^help$/i", $msg[1])){
+				$query = "SELECT msg FROM messages WHERE type = :type";
+				$data = array(array(":type","help"));
+				$result = dbQuery('single', $query, $data, $db);
+
+				// Spam prevention
+				$spam = $spamPrevention($result['msg']);
+
 				$client->messages->create($roomIds[$currentRoom],
+					$spam.
 					"@".$message['fromUser']['username'].
-					" Available functions:\n".
-					"- Parse Javascript code and output result (command: help javascript)\n".
-					"- Do Javascript challenges (command: help challenges)"
+					" ".$result['msg']
 				);
 			
 			// Command 'help javascript' received
 			} else if(preg_match("/^help javascript$/i", $msg[1])){
-				$client->messages->create($roomIds[$currentRoom],
-					"@".$message['fromUser']['username'].
-					" Put your Javascript code between 3 backticks and I will return you its result.\n".
-					"Do NOT use `console.log()`. Instead, call the result directly, like:\n".
-					"```\n".
-					"let example = 'Hello World!';\n".
-					"example;\n".
-					"```\n".
-					"Use `JSON.stringify()` or `array.toString()` to output arrays.\n\n".
+				$query = "SELECT msg FROM messages WHERE type = :type";
+				$data = array(array(":type","help javascript"));
+				$result = dbQuery('single', $query, $data, $db);
 
-					"Current limitations:\n".
-					"- I can only output 1 result at a time. (Don't output results in a loop as it will only return the last loop)\n".
-					"- My time limit is set to 10 seconds. Scripts taking more time will be killed\n".
-					"- My memory limit is set to 10 MegaBytes. Scripts taking more memory will be killed"
+				// Spam prevention
+				$spam = $spamPrevention($result['msg']);
+
+				$client->messages->create($roomIds[$currentRoom],
+					$spam.
+					"@".$message['fromUser']['username'].
+					" ".$result['msg']
 				);
 
 			// Command 'help challenges' received
 			} else if(preg_match("/^help challenges$/i", $msg[1])){
 				if($roomIds[$currentRoom] == '5b903b77d73408ce4fa70b9c'){
-					$client->messages->create($roomIds[$currentRoom],
-						"@".$message['fromUser']['username'].
-						" Similar to [Codewars](https://www.codewars.com), I can provide Javascript challenges which you need to solve.\n".
-						"To see the current challenge (command: challenge)\n".
-						"To input your solution (command: solve) followed by your code between 3 backticks\n".
-						"To see the ranks (command: ranks)\n".
-						"To see how many points you've earned (command: points)\n\n".
+					$query = "SELECT msg FROM messages WHERE type = :type";
+					$data = array(array(":type","help challenges"));
+					$result = dbQuery('single', $query, $data, $db);
 
-						"If you wish to contribute your own challenge, please go to [". BOTURL ."](". BOTURL .") and follow the instructions"
+					// Spam prevention
+					$spam = $spamPrevention($result['msg']);
+
+					$client->messages->create($roomIds[$currentRoom],
+						$spam.
+						"@".$message['fromUser']['username'].
+						" ".$result['msg']
 					);
 				} else {
+					$query = "SELECT msg FROM messages WHERE type = :type";
+					$data = array(array(":type","help challenges wrong room"));
+					$result = dbQuery('single', $query, $data, $db);
+
+					// Spam prevention
+					$spam = $spamPrevention($result['msg']);
+
 					$client->messages->create($roomIds[$currentRoom],
+						$spam.
 						"@".$message['fromUser']['username'].
-						" Javascript challenges are only available in the room: [JavascriptChallenges](https://gitter.im/FreeCodeCamp/JavascriptChallenges)"
+						" ".$result['msg']
 					);
 				}
 
 			// Command 'challenge' received
 			} else if(preg_match("/^challenge$/i", $msg[1])){
 
-				if($roomIds[$currentRoom] == '5b903b77d73408ce4fa70b9c'){
-					// Select current challenge from database
-					$db->query("SELECT description, conditions, example FROM challenges WHERE current = 1");
+				// Make sure user is in the correct room
+				if($roomIds[$currentRoom] == CHALLENGEROOM){
+					$query = "SELECT description, conditions, example FROM challenges WHERE current = 1";
+					$result = dbQuery('single', $query, array(), $db);
 
-					try {
-						$dbresult = $db->single();
-					} catch(PDOException $e){
-						echo "PDO Error: ". $e->getMessage();
-						$client->messages->create($roomIds[$currentRoom],
-							"@".$message['fromUser']['username'].
-							" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-							"To prevent further issues I will now shut down."
-						);
-						exit;
-					}
+					$msg = " The current challenge is:\n".
+						$result['description']."\n\n".
+						"Rules:\n".
+						$result['conditions']."\n\n".
+						"Example:\n".
+						$result['example'];
+
+					// Spam prevention
+					$spam = $spamPrevention($msg);
 
 					// Return current challenge to user
 					$client->messages->create($roomIds[$currentRoom],
+						$spam.
 						"@".$message['fromUser']['username'].
-						" The current challenge is:\n".
-						$dbresult['description']."\n\n".
-						"Rules:\n".
-						$dbresult['conditions']."\n\n".
-						"Example:\n".
-						$dbresult['example']
+						$msg
 					);
+
+				// User is in the wrong room
 				} else {
+					$query = "SELECT msg FROM messages WHERE type = :type";
+					$data = array(array(":type","challenges cmd wrong room"));
+					$result = dbQuery('single', $query, $data, $db);
+
+					// Spam prevention
+					$spam = $spamPrevention($result['msg']);
+
 					$client->messages->create($roomIds[$currentRoom],
+						$spam.
 						"@".$message['fromUser']['username'].
-						" This command is only available in the room: [JavascriptChallenges](https://gitter.im/FreeCodeCamp/JavascriptChallenges)"
+						" ".$result['msg']
 					);
 				}
-			
+
 			// Command 'solve' received
 			} else if(preg_match("/^solve/i", $msg[1])){
 
-				if($roomIds[$currentRoom] == '5b903b77d73408ce4fa70b9c'){
-				// Verify user providing a solution
+				// Make sure user is in the correct room
+				if($roomIds[$currentRoom] == CHALLENGEROOM){
+
+					// Verify user is providing a solution
 					if(preg_match("/```(.*)```/s", $message['text'], $result)){
 
 						// Sandbox user provided code
@@ -136,27 +227,19 @@ $result[1]
 EOT;
 
 						// Select current challenge's tests from database
-						$db->query("SELECT id, tests, results FROM challenges WHERE current = 1");
-
-						try {
-							$dbresult = $db->single();
-						} catch(PDOException $e){
-							echo "PDO Error: ". $e->getMessage();
-							$client->messages->create($roomIds[$currentRoom],
-								"@".$message['fromUser']['username'].
-								" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-								"To prevent further issues I will now shut down."
-							);
-							exit;
-						}
+						$query = "SELECT id, tests, results FROM challenges WHERE current = 1";
+						$result = dbQuery('single', $query, array(), $db);
+						$challengeID = $result['id'];
 
 						// Parse tests and their expected results into arrays
-						$tests = explode("\n", $dbresult['tests']);
-						$results = explode("\n", $dbresult['results']);
+						$tests = explode("\n", $result['tests']);
+						$results = explode("\n", $result['results']);
 
-						// Assume user provided correct solution
+						// Assume user provided correct solution and no JS errors were present
 						$solved = true;
+						$error = false;
 						
+						// Placeholder for wrong test results
 						$testResults = "";
 
 						// Run tests against user provided solution
@@ -171,13 +254,17 @@ EOT;
 							try {
 								$output = $v8->executeString($run);
 
+								// JSON encode if result is object
 								if(is_object($output)){
 									$output = json_encode($output);
 								}
 
 								// Test failed
 								if($output != $results[$i]){
-									$testResults .= "Test `".$tests[$i]."` should return `".$results[$i]."`. Instead got: `".$output."`.\n";
+									if(is_bool($output)){
+										if($output){ $output = 'true'; } else { $output = 'false'; }
+									}
+									$testResults .= "Test `".$tests[$i]."` should return `".$results[$i]."`. Instead got: `".$output."` .\n";
 									$solved = false;
 								}
 
@@ -185,14 +272,22 @@ EOT;
 							} catch (V8JsException $e) {
 								$output = $e->getMessage();
 
-								$client->messages->create($roomIds[$currentRoom],
-									"@".$message['fromUser']['username'].
-									" There was an error with your Javascript code:\n".
+								$msg = " There was an error with your Javascript code:\n".
 									"```\n".
 									$output."\n".
-									"```"
+									"```";
+
+								// Spam prevention
+								$spam = $spamPrevention($msg);
+
+								$client->messages->create($roomIds[$currentRoom],
+									$spam.
+									"@".$message['fromUser']['username'].
+									$msg
 								);
+
 								$solved = false;
+								$error = true;
 								break;
 							}
 
@@ -203,256 +298,400 @@ EOT;
 						if($solved){
 
 							// Add challenge to challenges array so it doesn't get selected again
-							array_push($challenges, $dbresult['id']);
+							array_push($challengeIds, $result['id']);
 
 							// Verify if user already solved the current challenge in the past
-							$db->query("SELECT id FROM solved WHERE username = :user AND challengeid = :id");
-							$db->bind(":user", $message['fromUser']['username']);
-							$db->bind(":id", $dbresult['id']);
-
-							try {
-								$dbUserResult = $db->single();
-							} catch(PDOException $e){
-								echo "PDO Error: ". $e->getMessage();
-								$client->messages->create($roomIds[$currentRoom],
-									"@".$message['fromUser']['username'].
-									" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-									"To prevent further issues I will now shut down."
-								);
-								exit;
-							}
+							$query = "SELECT id FROM solved WHERE username = :user AND challengeid = :id";
+							$data = array(
+								array(":user", $message['fromUser']['username']),
+								array(":id", $result['id'])
+							);
+							$result = dbQuery('single', $query, $data, $db);
 
 							// User solved the challenge in the past
 							if($db->rowCount() > 0){
-								// Congratulate user
+								$query = "SELECT msg FROM messages WHERE type = :type";
+								$data = array(array(":type","solved no points"));
+								$result = dbQuery('single', $query, $data, $db);
+
+								// Spam prevention
+								$spam = $spamPrevention($result['msg']);
+
 								$client->messages->create($roomIds[$currentRoom],
+									$spam.
 									"@".$message['fromUser']['username'].
-									" Congratulations! Your solution is correct!\n".
-									"You were not granted any points for this solution because you've already solved this challenge before.\n".
-									"A new random challenge has been selected. Keep in mind that this could be the same challenge as before. The chance of this happening will decrease as more challenges are added to the database.\n".
-									"Message \"challenge\" to me to see the new challenge!"
+									" ".$result['msg']
 								);
 							} else {
-								// Congratulate user
-								$client->messages->create($roomIds[$currentRoom],
-									"@".$message['fromUser']['username'].
-									" Congratulations! Your solution is correct!\n".
-									"A new random challenge has been selected. Keep in mind that this could be the same challenge as before. The chance of this happening will decrease as more challenges are added to the database.\n".
-									"Message \"challenge\" to me to see the new challenge!"
+								
+								// Add the user the list of users that has solved the challenge
+								$query = "INSERT INTO solved (`challengeid`,`username`) VALUES (:id, :user)";
+								$data = array(
+									array(":id", $challengeID),
+									array(":user", $message['fromUser']['username'])
 								);
+								$result = dbQuery('insert', $query, $data, $db);
 
-								// Grant user a point for the correct solution
-								$db->query("INSERT INTO users (`username`,`points`) VALUES (:user, 1) ON DUPLICATE KEY UPDATE points = points + 1");
-								$db->bind(":user", $message['fromUser']['username']);
+								if($result !== 'success'){
+									
+									// Spam prevention
+									$spam = $spamPrevention($result);
 
-								try {
-									$db->execute();
-								} catch(PDOException $e){
-									echo "PDO Error: ". $e->getMessage();
 									$client->messages->create($roomIds[$currentRoom],
+										$spam.
 										"@".$message['fromUser']['username'].
-										" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-										"To prevent further issues I will now shut down."
+										" ".$result
 									);
-									exit;
 								}
-							}
 
-							// Add the user the list of users that has solved the challenge
-							$db->query("INSERT INTO solved (`challengeid`,`username`) VALUES (:id, :user)");
-							$db->bind(":id", $dbresult['id']);
-							$db->bind(":user", $message['fromUser']['username']);
+								$query = "SELECT msg FROM messages WHERE type = :type";
+								$data = array(array(":type","solved"));
+								$result = dbQuery('single', $query, $data, $db);
 
-							try {
-								$db->execute();
-							} catch(PDOException $e){
-								echo "PDO Error: ". $e->getMessage();
+								// Spam prevention
+								$spam = $spamPrevention($result['msg']);
+
 								$client->messages->create($roomIds[$currentRoom],
+									$spam.
 									"@".$message['fromUser']['username'].
-									" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-									"To prevent further issues I will now shut down."
+									" ".$result['msg']
 								);
-								exit;
+
+								$query = "INSERT INTO users (`username`,`points`) VALUES (:user, 1) ON DUPLICATE KEY UPDATE points = points + 1";
+								$data = array(array(":user", $message['fromUser']['username']));
+								$result = dbQuery('insert', $query, $data, $db);
+
+								if($result !== 'success'){
+									
+									// Spam prevention
+									$spam = $spamPrevention($result);
+
+									$client->messages->create($roomIds[$currentRoom],
+										$spam.
+										"@".$message['fromUser']['username'].
+										" ".$result
+									);
+								}
 							}
 
 							// Remove the current status from the challenge
-							$db->query("UPDATE challenges SET solved = solved + 1, current = 0 WHERE current = 1");
+							$query = "UPDATE challenges SET solved = solved + 1, current = 0 WHERE current = 1";
+							$result = dbQuery('update', $query, array(), $db);
 
-							try {
-								$db->execute();
-							} catch(PDOException $e){
-								echo "PDO Error: ". $e->getMessage();
+							if($result !== 'success'){
+									
+								// Spam prevention
+								$spam = $spamPrevention($result);
+
 								$client->messages->create($roomIds[$currentRoom],
+									$spam.
 									"@".$message['fromUser']['username'].
-									" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-									"To prevent further issues I will now shut down."
+									" ".$result
 								);
-								exit;
 							}
 
 							// Select a random new challenge
-							$db->query("SELECT id FROM challenges WHERE id NOT IN (".implode(',', $challenges).") AND status = 2 ORDER BY RAND() LIMIT 1");
-
-							try {
-								$dbresult = $db->single();
-							} catch(PDOException $e){
-								echo "PDO Error: ". $e->getMessage();
-								$client->messages->create($roomIds[$currentRoom],
-									"@".$message['fromUser']['username'].
-									" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-									"To prevent further issues I will now shut down."
-								);
-								exit;
-							}
+							$query = "SELECT id FROM challenges WHERE id NOT IN (:challenges) AND status = 2 ORDER BY RAND() LIMIT 1";
+							//print_r($challengeIds);
+							$data = array(array(":challenges", implode(',', $challengeIds)));
+							$result = dbQuery('single', $query, $data, $db);
+							//echo $result['id'];
 
 							if($db->rowCount() > 0){
-								// Set the random selected challenge to current
-								$db->query("UPDATE challenges SET current = 1 WHERE id = :id");
-								$db->bind(":id", $dbresult['id']);
 
-								try {
-									$db->execute();
-								} catch(PDOException $e){
-									echo "PDO Error: ". $e->getMessage();
+								// Set the random selected challenge to current
+								$query = "UPDATE challenges SET current = 1 WHERE id = :id";
+								$data = array(array(":id", $result['id']));
+								$result = dbQuery('update', $query, $data, $db);
+
+								if($result !== 'success'){
+									
+									// Spam prevention
+									$spam = $spamPrevention($result);
+
 									$client->messages->create($roomIds[$currentRoom],
+										$spam.
 										"@".$message['fromUser']['username'].
-										" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-										"To prevent further issues I will now shut down."
+										" ".$result
 									);
-									exit;
 								}
 							} else {
-								$challenges = array();
+								$challengeIds = array();
 
 								// Select a random new challenge
-								$db->query("SELECT id FROM challenges WHERE id NOT IN (".implode(',', $challenges).") AND status = 2 ORDER BY RAND() LIMIT 1");
-
-								try {
-									$dbresult = $db->single();
-								} catch(PDOException $e){
-									echo "PDO Error: ". $e->getMessage();
-									$client->messages->create($roomIds[$currentRoom],
-										"@".$message['fromUser']['username'].
-										" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-										"To prevent further issues I will now shut down."
-									);
-									exit;
-								}
+								$query = "SELECT id FROM challenges WHERE id NOT IN (:challenges) AND status = 2 ORDER BY RAND() LIMIT 1";
+								$data = array(array(":challenges", implode(',', $challengeIds)));
+								$result = dbQuery('single', $query, array(), $db);
 
 								// Set the random selected challenge to current
-								$db->query("UPDATE challenges SET current = 1 WHERE id = :id");
-								$db->bind(":id", $dbresult['id']);
+								$query = "UPDATE challenges SET current = 1 WHERE id = :id";
+								$data = array(array(":id", $result['id']));
+								$result = dbQuery('update', $query, $data, $db);
 
-								try {
-									$db->execute();
-								} catch(PDOException $e){
-									echo "PDO Error: ". $e->getMessage();
+								if($result !== 'success'){
+									
+									// Spam prevention
+									$spam = $spamPrevention($result);
+
 									$client->messages->create($roomIds[$currentRoom],
+										$spam.
 										"@".$message['fromUser']['username'].
-										" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-										"To prevent further issues I will now shut down."
+										" ".$result
 									);
-									exit;
 								}
 							}
-						} else {
+						} else if(!$error) {
+							$msg = $testResults."Please try again!";
+
+							// Spam prevention
+							$spam = $spamPrevention($msg);
+
 							$client->messages->create($roomIds[$currentRoom],
+								$spam.
 								"@".$message['fromUser']['username'].
-								" ".$testResults."Please try again!"
+								" ".$msg
 							);
 						}
 
 					// User did not provide a solution
 					} else {
+						$query = "SELECT msg FROM messages WHERE type = :type";
+						$data = array(array(":type","no solution"));
+						$result = dbQuery('single', $query, $data, $db);
+
+						// Spam prevention
+						$spam = $spamPrevention($result['msg']);
+
 						$client->messages->create($roomIds[$currentRoom],
+							$spam.
 							"@".$message['fromUser']['username'].
-							" Please provide your solution between 3 backticks."
+							" ".$result['msg']
 						);
 					}
 				} else {
+					$query = "SELECT msg FROM messages WHERE type = :type";
+					$data = array(array(":type","challenges cmd wrong room"));
+					$result = dbQuery('single', $query, $data, $db);
+
+					// Spam prevention
+					$spam = $spamPrevention($result['msg']);
+
 					$client->messages->create($roomIds[$currentRoom],
+						$spam.
 						"@".$message['fromUser']['username'].
-						" This command is only available in the room: [JavascriptChallenges](https://gitter.im/FreeCodeCamp/JavascriptChallenges)"
+						" ".$result['msg']
 					);
 				}
-			
+
 			// Command 'ranks' received
 			} else if(preg_match("/^ranks/i", $msg[1])){
-				if($roomIds[$currentRoom] == '5b903b77d73408ce4fa70b9c'){
-					$db->query("SELECT username, points FROM users ORDER BY points DESC LIMIT 5");
 
-					try {
-						$dbresults = $db->resultset();
-					} catch(PDOException $e){
-						echo "PDO Error: ". $e->getMessage();
-						$client->messages->create($roomIds[$currentRoom],
-							"@".$message['fromUser']['username'].
-							" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-							"To prevent further issues I will now shut down."
-						);
-						exit;
-					}
+				// Make sure user is in the correct room
+				if($roomIds[$currentRoom] == CHALLENGEROOM){
+					$query = "SELECT username, points FROM users ORDER BY points DESC";
+					$results = dbQuery('resultset', $query, array(), $db);
 
 					if($db->rowCount() > 0){
 						$list = "";
 						$place = 1;
+						$points = 0;
+						$firstLoop = true;
 
-						foreach($dbresults as $result){
-							$list .= $place .". ". $result['username'] ." with ". $result['points'] ." points!\n";
-							$place++;
+						foreach($results as $result){
+							if($firstLoop){
+								$points = $result['points'];
+								$firstLoop = false;
+
+								$list .= $place .". ". $result['username'] ." with ". $result['points'] ." points!\n";
+								continue;
+							} else {
+
+								if($result['points'] == $points){
+									$list .= $result['username'] ." with ". $result['points'] ." points!\n";
+								} else if($place < 5){
+									$points = $result['points'];
+									$place++;
+									$list .= $place .". ". $result['username'] ." with ". $result['points'] ." points!\n";
+								} else {
+									break;
+								}
+							}
 						}
 
-						$client->messages->create($roomIds[$currentRoom], "@".$message['fromUser']['username']." \n".$list);
+						// Spam prevention
+						$spam = $spamPrevention($list);
+
+						$client->messages->create($roomIds[$currentRoom], $spam."@".$message['fromUser']['username']." \n".$list);
 					} else {
+						$msg = "No one has received any points yet!";
+
+						// Spam prevention
+						$spam = $spamPrevention($msg);
+
 						$client->messages->create($roomIds[$currentRoom],
+							$spam.
 							"@".$message['fromUser']['username'].
-							" No one has received any points yet!"
+							" ".$msg
 						);
 					}
 				} else {
+					$query = "SELECT msg FROM messages WHERE type = :type";
+					$data = array(array(":type","challenges cmd wrong room"));
+					$result = dbQuery('single', $query, $data, $db);
+
+					// Spam prevention
+					$spam = $spamPrevention($result['msg']);
+
 					$client->messages->create($roomIds[$currentRoom],
+						$spam.
 						"@".$message['fromUser']['username'].
-						" This command is only available in the room: [JavascriptChallenges](https://gitter.im/FreeCodeCamp/JavascriptChallenges)"
+						" ".$result['msg']
 					);
 				}
 
 			// Command 'points' received
 			} else if(preg_match("/^points/i", $msg[1])){
-				if($roomIds[$currentRoom] == '5b903b77d73408ce4fa70b9c'){
-					$db->query("SELECT points FROM users WHERE username = :user");
-					$db->bind(":user", $message['fromUser']['username']);
 
-					try {
-						$dbresult = $db->single();
-					} catch(PDOException $e){
-						echo "PDO Error: ". $e->getMessage();
-						$client->messages->create($roomIds[$currentRoom],
-							"@".$message['fromUser']['username'].
-							" There was an error with my database. @".BOTOWNER." has been informed about this issue.\n".
-							"To prevent further issues I will now shut down."
-						);
-						exit;
-					}
+				// Make sure user is in the correct room
+				if($roomIds[$currentRoom] == CHALLENGEROOM){
+
+					$query = "SELECT points FROM users WHERE username = :user";
+					$data = array(array(":user", $message['fromUser']['username']));
+					$result = dbQuery('single', $query, $data, $db);
 
 					if($db->rowCount() > 0){
+						$msg = "You currently have: ". $result['points'] ." points!";
+
+						// Spam prevention
+						$spam = $spamPrevention($msg);
+
 						$client->messages->create($roomIds[$currentRoom],
+							$spam.
 							"@".$message['fromUser']['username'].
-							" You currently have: ". $dbresult['points'] ." points!"
+							" ".$msg
 						);
 					} else {
+						$query = "SELECT msg FROM messages WHERE type = :type";
+						$data = array(array(":type","no points"));
+						$result = dbQuery('single', $query, $data, $db);
+
+						// Spam prevention
+						$spam = $spamPrevention($result['msg']);
+
 						$client->messages->create($roomIds[$currentRoom],
+							$spam.
 							"@".$message['fromUser']['username'].
-							" You did not receive any points yet. Try being the first to solve a challenge and start earning points!"
+							" ".$result['msg']
 						);
 					}
 				} else {
+					$query = "SELECT msg FROM messages WHERE type = :type";
+					$data = array(array(":type","challenges cmd wrong room"));
+					$result = dbQuery('single', $query, $data, $db);
+
+					// Spam prevention
+					$spam = $spamPrevention($result['msg']);
+
 					$client->messages->create($roomIds[$currentRoom],
+						$spam.
 						"@".$message['fromUser']['username'].
-						" This command is only available in the room: [JavascriptChallenges](https://gitter.im/FreeCodeCamp/JavascriptChallenges)"
+						" ".$result['msg']
 					);
 				}
-			// Admin Command 'stop' recieved
-			} else if(preg_match("/^points/i", $msg[1])){
+
+			// Admin Command 'skip challenge' recieved
+			} else if(preg_match("/^skip challenge/i", $msg[1])){
+
+				// Verify Admin
+				if($message['fromUser']['username'] == BOTOWNER){
+
+					$query = "SELECT id FROM challenges WHERE current = 1";
+					$result = dbQuery('single', $query, array(), $db);
+
+					// Add challenge to challenges array so it doesn't get selected again
+					array_push($challengeIds, $result['id']);
+
+					// Remove the current status from the challenge
+					$query = "UPDATE challenges SET current = 0 WHERE current = 1";
+					$result = dbQuery('update', $query, array(), $db);
+
+					if($result !== 'success'){
+									
+						// Spam prevention
+						$spam = $spamPrevention($result);
+
+						$client->messages->create($roomIds[$currentRoom],
+							$spam.
+							"@".$message['fromUser']['username'].
+							" ".$result
+						);
+					}
+
+					// Select a random new challenge
+					$query = "SELECT id FROM challenges WHERE id NOT IN (:challenges) AND status = 2 ORDER BY RAND() LIMIT 1";
+					$data = array(array(":challenges", implode(',', $challengeIds)));
+					$result = dbQuery('single', $query, array(), $db);
+
+					if($db->rowCount() > 0){
+
+						// Set the random selected challenge to current
+						$query = "UPDATE challenges SET current = 1 WHERE id = :id";
+						$data = array(array(":id", $result['id']));
+						$result = dbQuery('update', $query, $data, $db);
+
+						if($result !== 'success'){
+							
+							// Spam prevention
+							$spam = $spamPrevention($result);
+
+							$client->messages->create($roomIds[$currentRoom],
+								$spam.
+								"@".$message['fromUser']['username'].
+								" ".$result
+							);
+						}
+					} else {
+						$challengeIds = array();
+
+						// Select a random new challenge
+						$query = "SELECT id FROM challenges WHERE id NOT IN (:challenges) AND status = 2 ORDER BY RAND() LIMIT 1";
+						$data = array(array(":challenges", implode(',', $challengeIds)));
+						$result = dbQuery('single', $query, array(), $db);
+
+						// Set the random selected challenge to current
+						$query = "UPDATE challenges SET current = 1 WHERE id = :id";
+						$data = array(array(":id", $result['id']));
+						$result = dbQuery('update', $query, $data, $db);
+
+						if($result !== 'success'){
+							
+							// Spam prevention
+							$spam = $spamPrevention($result);
+
+							$client->messages->create($roomIds[$currentRoom],
+								$spam.
+								"@".$message['fromUser']['username'].
+								" ".$result
+							);
+						}
+					}
+
+					$msg = "The current challenge has been skipped. A new random challenge is selected.\nMessage \"challenge\" to me to see the new challenge!";
+
+					// Spam prevention
+					$spam = $spamPrevention($msg);
+
+					$client->messages->create($roomIds[$currentRoom],
+						$spam.
+						"@".$message['fromUser']['username'].
+						" ".$msg
+					);
+				}
+
+			// Admin Command 'stop' received
+			} else if(preg_match("/^stop/i", $msg[1])){
+
+				// Verify Admin
 				if($message['fromUser']['username'] == BOTOWNER){
 				
 					$client->messages->create($roomIds[$currentRoom],
@@ -463,11 +702,11 @@ EOT;
 				}
 
 			// No command received. User is trying to run JS code
-			} else if(preg_match("/```(.*)```/s", $msg[1], $result)){
+			} else if(preg_match("/```(.*)```/s", $msg[1], $code)){
 
 				// Sandbox user provided code
 				$js = <<<EOT
-$result[1]
+$code[1]
 EOT;
 
 				// Instantiate V8Js engine
@@ -480,21 +719,33 @@ EOT;
 
 					if(is_object($output)){
 						$output = json_encode($output);
+					} else if(is_array($output)){
+						$output = print_r($output, true);
 					}
 
-					if(strlen($output) > 200){
+					if(strlen($output) > 400){
+						$query = "SELECT msg FROM messages WHERE type = :type";
+						$data = array(array(":type","javascript too long"));
+						$result = dbQuery('single', $query, $data, $db);
+
+						// Spam prevention
+						$spam = $spamPrevention($result['msg']);
+
 						$client->messages->create($roomIds[$currentRoom],
+							$spam.
 							"@".$message['fromUser']['username'].
-							" The result of your Javascript code is too lengthy and would disrupt the room.\n".
-							"Please narrow the result down to below 200 characters."
+							" ".$result['msg']
 						);
 					} else {
+						$msg = "The result of your Javascript code is:\n```\n".$output."\n```";
+
+						// Spam prevention
+						$spam = $spamPrevention($msg);
+
 						$client->messages->create($roomIds[$currentRoom],
+							$spam.
 							"@".$message['fromUser']['username'].
-							" The result of your Javascript code is:\n".
-							"```\n".
-							$output."\n".
-							"```"
+							" ".$msg
 						);
 					}
 				
@@ -502,12 +753,15 @@ EOT;
 				} catch (V8JsException $e) {
 					$output = $e->getMessage();
 
+					$msg = "There was an error with your Javascript code:\n```\n".$output."\n```";
+
+					// Spam prevention
+					$spam = $spamPrevention($msg);
+
 					$client->messages->create($roomIds[$currentRoom],
+						$spam.
 						"@".$message['fromUser']['username'].
-						" There was an error with your Javascript code:\n".
-						"```\n".
-						$output."\n".
-						"```"
+						" ".$msg
 					);
 				}
 
